@@ -16,6 +16,7 @@ from . import (
     elapsed_time,
     engine,
     feasibility,
+    raw_diff,
     reconciliation,
     retraction,
     scenarios,
@@ -135,6 +136,12 @@ class ElapsedBoundsBody(BaseModel):
     end_event: str
     threshold_seconds: Any               # 在 audit_elapsed 内严格校验（非负/有限/数值）
     overrides: dict[str, SourceAssumption] = Field(default_factory=dict)
+
+
+class RawDiffBody(BaseModel):
+    """两条事件原始载荷结构差异比较：左 / 右事件 ID（只读，不改记录）。"""
+    left: str
+    right: str
 
 
 def _scenario_exc(exc: Exception) -> HTTPException:
@@ -593,6 +600,32 @@ def elapsed_time_bounds(body: ElapsedBoundsBody) -> dict[str, Any]:
     except elapsed_time.ElapsedError as exc:
         raise HTTPException(404 if "不存在" in str(exc) else 400,
                             str(exc)) from exc
+
+
+# ----------------------------------------------------- 两事件原始载荷结构差异
+
+@app.post("/api/events/raw-diff")
+def events_raw_diff(body: RawDiffBody) -> dict[str, Any]:
+    """比较两条事件库内 raw 的结构差异（只读，不修改任何记录）。
+
+    对象按键递归：单侧键列为新增 / 删除（子树不展开）；标量值或 JSON
+    类型不同列为替换（布尔不与数值相等）；数组按元素深度相等求最长公共
+    子序列，未匹配元素列为删除 / 新增，最优对齐等长时相等元素优先配对、
+    否则优先跳过左侧。每项带 op、存在侧值（缺失侧省略，不以 null 代替）
+    与 JSON Pointer 路径（~0/~1 转义，根为空串）。ID 为空 → 400；
+    任一事件不存在 → 404 并说明是哪一侧哪个 ID；两 ID 相同且记录相同 →
+    空差异。
+    """
+    try:
+        return raw_diff.compare_event_raws(body.left, body.right)
+    except raw_diff.RawDiffError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except KeyError as exc:
+        event_id, side = exc.args[0], exc.args[1] if len(exc.args) > 1 else ""
+        side_name = {"left": "左侧", "right": "右侧"}.get(side, "")
+        detail = f"{side_name}事件不存在: {event_id}".strip() if side_name \
+            else f"事件不存在: {event_id}"
+        raise HTTPException(404, detail) from exc
 
 
 # ----------------------------------------------------------------- 前端

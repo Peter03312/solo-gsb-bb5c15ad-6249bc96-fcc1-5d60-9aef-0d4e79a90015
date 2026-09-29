@@ -290,6 +290,73 @@ python tests/test_batches.py           # 纯标准库，覆盖导入批次与安
 
 ---
 
+## 两事件原始载荷结构差异对比（🔍）
+
+审计员核对两条事件的**原始载荷**（导入时原样保存的 `events.raw`）时，需要一份精确的
+结构化差异，而不是肉眼比 JSON。点右上 **🔍 原始载荷对比**（API 为
+`POST /api/events/raw-diff`）：
+
+1. 填写**左侧事件 ID**、**右侧事件 ID**（输入框带当前时间线事件的 datalist 候选，也可
+   直接粘贴任意库内 ID），点 **▶ 比较**（或在输入框按回车）。比较**完全只读**，不修改
+   任何记录；两侧填同一个 ID 即与自身比较，差异为空。
+2. 比较规则：
+   - **对象按键递归**：键仅在一侧出现 → 列为 `removed`（仅左）/ `added`（仅右），
+     **整棵子树各记一项，不重复展开**内部差异；两侧共有的键继续递归。
+   - **标量值不同、或 JSON 类型不同 → `replaced` 一项**（同样不展开）。
+     **布尔值不与数值视为相等**：`true` 与 `1`、`false` 与 `0` 都是类型替换；
+     而数值 `1` 与 `1.0` 是同一个 JSON 数字，判等。
+   - **数组按元素深度相等求最长公共子序列（LCS）**：匹配位置按序对齐，未匹配元素分别
+     列为 `removed` / `added`，子树不展开。多个最优对齐等长时，**相等元素优先配对**，
+     否则**优先跳过左侧元素**（左元素先记删除），结果确定可复现。
+3. **每项**带：`op`（`added` / `removed` / `replaced`）、存在侧的值（`left` / `right`），
+   以及与原数组下标对应的 **JSON Pointer 路径**（`~0` 转义 `~`、`~1` 转义 `/`，
+   根路径为空字符串 `""`）。**缺失侧直接省略对应字段**——显式 JSON `null` 照常写出
+   `null`，绝不用 `null` 表示"该侧缺失"。
+4. 返回与页面都给出**各类数量**（`op_counts`）与**明细**；两条记录完全相同时
+   `identical: true`、差异列表为空。任一 ID **不存在 → 404** 并在 `detail` 中给出
+   具体是哪个 ID；ID 为空 → 400。页面顶部汇总新增/删除/替换数量，明细按文档前序
+   （对象键字典序、数组原下标）展示两侧值与路径。
+5. 点 **⬇ 下载 JSON** 可把本次比较结果（含完整子树值，页面有长度截断）保存为
+   `raw_diff_<左ID>__vs__<右ID>.json` 作为审计证据。
+
+curl 示例：
+
+```bash
+curl -X POST http://localhost:8000/api/events/raw-diff \
+  -H 'Content-Type: application/json' \
+  -d '{"left":"evt-gateway-0001","right":"evt-app-0007"}'
+```
+
+响应示例：
+
+```json
+{
+  "comparison_type": "event-raw-diff",
+  "left": {"event_id": "evt-gateway-0001"},
+  "right": {"event_id": "evt-app-0007"},
+  "identical": false,
+  "op_counts": {"added": 1, "removed": 1, "replaced": 2},
+  "differences": [
+    {"op": "replaced", "path": "/a~1b", "left": null, "right": "x"},
+    {"op": "replaced", "path": "/mfa", "left": true, "right": 1},
+    {"op": "added", "path": "/tags", "right": ["vpn"]},
+    {"op": "removed", "path": "/upstream", "left": {"ip": "10.0.0.1"}}
+  ]
+}
+```
+
+ID 不存在时被拒绝并说明原因（指明哪一侧、哪个 ID）：
+
+```bash
+$ curl -i -X POST http://localhost:8000/api/events/raw-diff \
+    -H 'Content-Type: application/json' \
+    -d '{"left":"evt-gateway-0001","right":"typo-id"}'
+HTTP/1.1 404 Not Found
+{"detail":"右侧事件不存在: typo-id"}
+```
+
+---
+
 ## 导入批次查看与撤回（🗂）
 
 审计实践中常需要"把上一次导入的那一份 JSON 整体撤回，但别动更早的数据"。点右上
@@ -454,6 +521,12 @@ gap ∈ [ lo_b - hi_a ,  hi_b - lo_a ]
   分别给出达到端点的全量事件时刻见证（分批渲染、可点击定位），附朴素两区间差对照与
   起终点约束路径方向说明；全局无解时展示矛盾见证、不给耗时结论；事件未知 / 相同 /
   阈值非法明确拒绝；只读，不保存假设或改写数据。
+- **两事件原始载荷结构差异对比**（右上 🔍）：填左 / 右事件 ID（带事件候选列表），
+  对库内 raw 递归比较：对象单侧键列新增 / 删除（子树不展开）、值或 JSON 类型不同列替换
+  （布尔不与数值相等）、数组按元素深度相等求 LCS（平局相等优先配对、否则优先跳过左），
+  未匹配元素按原下标列增删；每项带 op、存在侧值（缺失侧省略，不以 null 代替缺失）与
+  JSON Pointer 路径（~0 / ~1 转义，根为空串）；展示三类数量与明细，相同记录差异为空，
+  不存在 / 空 ID 明确拒绝并说明原因；只读不改记录，结果可下载 JSON。
 - **导入批次**（右上 🗂）：按每次 JSON 导入形成的批次查看新增来源 / 事件 / 约束与未写入
   （重复 ID / 悬空端点 / 被拒）记录；确认后整批撤回——只删该批实际写入且仍存在、
   归属可安全证明的记录，保留导入前数据与重复未写入的 ID，自动移除批次约束并重建受影响
@@ -493,6 +566,7 @@ gap ∈ [ lo_b - hi_a ,  hi_b - lo_a ]
 | POST | `/api/source-reconciliation` | 双来源事件对账：复用校正区间（含未保存假设），按 actor/类型/闭区间容差做全局最优一一配对，返回配对（中点差/闭区间间距）与两侧未匹配事件（只读，每侧 ≤200，超限 400） |
 | POST | `/api/anchor-calibration` | 锚点校准：1～20 对已配对锚点 + 待校准方（a/b），复用含未保存调整的区间（固定漂移/不确定度），逐对求闭区间相交的待校准方 offset 增量范围并取交集；非空返回绝对 offset 范围与中点，为空返回决定冲突上下界的两对锚点（只读，锚点重复/事件失效/来源不一致 4xx） |
 | POST | `/api/elapsed-time-bounds` | 两事件耗时审计：复用全部事件闭区间 × 全部有效约束（含 source_order，允许同刻），在所有可行分配上求 t_end−t_start 的精确最小/最大值（可为负）及达到端点的全量事件时刻见证；最小>阈值必超、最大≤阈值必不超、否则可能超；全局无解返回矛盾见证不给结论；事件未知 404、起终点相同/阈值非法 400（只读，携带未保存 overrides，不受筛选影响） |
+| POST | `/api/events/raw-diff` | 两事件**原始载荷结构差异**：输入左/右事件 ID，对库内 `events.raw` 递归比较；对象单侧键列为新增/删除（子树不展开）、标量值或 JSON 类型不同列为替换（布尔≠数值）、数组按元素深度相等求 LCS 未匹配列增删（平局相等优先配对、否则优先跳过左）；每项带 `op`、存在侧值（缺失侧省略，不用 null）与 JSON Pointer 路径（`~0`/`~1`，根为 `""`）；返回各类数量与明细；相同记录差异为空；ID 为空 400、任一 ID 不存在 404 并说明；只读不改记录 |
 | GET | `/api/sample` | 下载内置示例 JSON |
 | POST | `/api/reset` | 清空全部数据 |
 | GET | `/api/health` | 健康检查（Compose healthcheck 使用） |
@@ -916,6 +990,7 @@ curl -X POST http://localhost:8000/api/elapsed-time-bounds \
 │   ├── reconciliation.py # 双来源事件对账：复用校正区间，整数毫秒四舍五入，Kuhn+匈牙利全局最优一一配对（反贪心/稳定输出/每侧200）
 │   ├── anchor_calibration.py # 锚点校准：1～20 对锚点逐对求闭区间相交的 offset 增量范围并取交集，冲突锚点定位，绝对 offset/中点（只读）
 │   ├── elapsed_time.py     # 两事件耗时审计：SCC 压缩 DAG 上分量最早/最晚 + 端点钉扎传播，求 t_end−t_start 精确 min/max 与全量见证（只读）
+│   ├── raw_diff.py       # 两事件原始载荷结构差异：对象按键递归、类型/标量替换（布尔≠数值）、数组深度相等 LCS（平局相等优先/否则跳左）、JSON Pointer 路径（~0/~1，缺失侧省略）
 │   ├── scenarios.py     # 命名假设方案快照 CRUD、双方案重算差异（冲突/歧义/边/时间线/参数）
 │   ├── sensitivity.py   # 偏移敏感性：临界点解析求解、稳定区间切分、逐段重算与差异配对
 │   ├── importer.py      # 多别名宽松 JSON 规范化、幂等入库、来源时序边重建、批次登记与账本
@@ -923,7 +998,7 @@ curl -X POST http://localhost:8000/api/elapsed-time-bounds \
 │   ├── db.py            # SQLite 连接、建表初始化（含 scenarios / import_batches / batch_items 表与旧库加列迁移）
 │   ├── timeutil.py      # 多格式时间戳解析（秒/毫秒/微秒/纳秒、ISO、RFC2822）
 │   ├── sample.py        # 内置示例案件
-│   └── static/          # 原生前端 index.html / style.css / app.js / compare.js / sensitivity.js / feasibility.js / retraction.js / reconciliation.js / elapsed.js / batches.js
+│   └── static/          # 原生前端 index.html / style.css / app.js / compare.js / sensitivity.js / feasibility.js / retraction.js / reconciliation.js / elapsed.js / raw_diff.js / batches.js
 ├── examples/login-anomaly.json
 ├── tests/test_engine.py      # 纯标准库测试（11 项）
 ├── tests/test_scenarios.py   # 方案快照与双方案对比测试（12 项）
@@ -933,6 +1008,7 @@ curl -X POST http://localhost:8000/api/elapsed-time-bounds \
 ├── tests/test_reconciliation.py # 双来源事件对账测试（22 项：舍入/闭区间/反贪心/同优稳定/上限拒绝/未保存假设）
 ├── tests/test_anchor_calibration.py # 锚点校准测试（21 项：单对范围/闭区间边界/交集/冲突锚点/漂移固定/未保存 offset/0.5ms 中点/重复·失效·来源不一致/1～20 限制）
 ├── tests/test_elapsed_time.py # 两事件耗时审计测试（20 项：精确 min/max/朴素对照/负界/环同刻/三态闭端点/全量见证/无解无结论/入参拒绝/未保存假设/只读/5000 事件）
+├── tests/test_raw_diff.py    # 原始载荷结构差异测试（27 项：对象递归/子树不展开/类型替换/布尔≠数值/null≠缺失/JSON Pointer 转义/数组 LCS 平局规则/下标路径/计数/只读/不存在·空 ID 拒绝/深度与大数组保护）
 ├── tests/test_batches.py      # 导入批次与安全撤回测试（16 项：账本/重复跳过/只删本批/重复 ID 不误删/source_order 重建/来源保留/外部悬空/不存在·已撤回·未确认·归属冲突拒绝/旧库迁移）
 ├── docker/entrypoint.sh # 启动钩子：初始化数据库后拉起 uvicorn
 ├── Dockerfile
