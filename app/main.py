@@ -16,6 +16,7 @@ from . import (
     elapsed_time,
     engine,
     feasibility,
+    rawdiff,
     reconciliation,
     retraction,
     scenarios,
@@ -30,7 +31,7 @@ STATIC_DIR = BASE_DIR / "static"
 app = FastAPI(
     title="事件证据链审计台",
     description="导入多来源 JSON 事件记录，校正时钟偏差，重建可解释时间线并定位冲突链。",
-    version="1.8.0",
+    version="1.9.0",
 )
 
 
@@ -135,6 +136,12 @@ class ElapsedBoundsBody(BaseModel):
     end_event: str
     threshold_seconds: Any               # 在 audit_elapsed 内严格校验（非负/有限/数值）
     overrides: dict[str, SourceAssumption] = Field(default_factory=dict)
+
+
+class RawDiffBody(BaseModel):
+    """两条事件原始载荷结构比较：左 / 右事件 ID（只读）。"""
+    left_id: str
+    right_id: str
 
 
 def _scenario_exc(exc: Exception) -> HTTPException:
@@ -593,6 +600,40 @@ def elapsed_time_bounds(body: ElapsedBoundsBody) -> dict[str, Any]:
     except elapsed_time.ElapsedError as exc:
         raise HTTPException(404 if "不存在" in str(exc) else 400,
                             str(exc)) from exc
+
+
+# ----------------------------------------------------- 两事件 raw 结构差异
+
+@app.post("/api/raw-diff")
+def raw_diff(body: RawDiffBody) -> dict[str, Any]:
+    """两条事件原始载荷（events.raw）的递归结构差异（只读，不修改记录）。
+
+    对象按键递归（键仅一侧出现 → 删除/新增，两侧都有继续递归）；标量值或
+    JSON 类型不同 → 替换（布尔不与数值相等）；数组按深度相等求 LCS，
+    相等元素优先配对，同优先跳过左侧；路径为 JSON Pointer。
+    返回各类数量与明细；ID 不存在或为空以 4xx 拒绝并说明原因。
+    """
+    try:
+        return rawdiff.compare_raw(body.left_id, body.right_id)
+    except rawdiff.RawDiffError as exc:
+        code = 400 if "不能为空" in str(exc) else 404
+        raise HTTPException(code, str(exc)) from exc
+
+
+@app.get("/api/raw-diff/export")
+def raw_diff_export(left_id: str, right_id: str) -> JSONResponse:
+    """下载两事件 raw 结构差异 JSON（GET，便于页面另存为文件）。"""
+    try:
+        payload = rawdiff.compare_raw(left_id, right_id)
+    except rawdiff.RawDiffError as exc:
+        code = 400 if "不能为空" in str(exc) else 404
+        raise HTTPException(code, str(exc)) from exc
+    safe = lambda s: "".join(c if c.isalnum() or c in "-_" else "_" for c in s)
+    return JSONResponse(
+        payload,
+        headers={"Content-Disposition":
+                 f'attachment; filename="raw_diff_{safe(left_id)}__{safe(right_id)}.json"'},
+    )
 
 
 # ----------------------------------------------------------------- 前端

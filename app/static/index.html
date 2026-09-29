@@ -25,6 +25,7 @@
     <button class="btn" id="btn-elapsed">⏳ 耗时审计</button>
     <button class="btn" id="btn-reconcile">🔗 双来源对账</button>
     <button class="btn" id="btn-compare">⚖ 方案对比</button>
+    <button class="btn" id="btn-rawdiff" title="对两条事件的库内原始载荷(raw)做递归结构差异比较">🔬 原始载荷比对</button>
     <button class="btn" id="btn-sensitivity">📈 偏移敏感性</button>
     <button class="btn" id="btn-export">⬇ 导出审计结果</button>
     <button class="btn ghost danger" id="btn-reset" title="清空全部数据与假设">清空数据</button>
@@ -252,6 +253,42 @@
   </div>
 </div>
 
+<!-- 两事件原始载荷结构差异抽屉 -->
+<div id="rawdiff-overlay" class="overlay hidden" aria-hidden="true">
+  <div class="overlay-card">
+    <div class="overlay-head">
+      <h2>🔬 原始载荷比对</h2>
+      <p class="subtitle">输入左、右两条事件的 ID，对库内 <b>raw 原始载荷</b>做递归结构差异比较（只读，不修改记录）。
+        对象按键递归：仅一侧出现的键列为<b>删除 / 新增</b>；标量值或 JSON 类型不同列为<b>替换</b>
+        （布尔不与数值相等，<code>true ≠ 1</code>）；数组按元素深度相等求最长公共子序列，
+        未匹配元素分别列为删除 / 新增；多种最优对齐时相等元素优先配对，否则优先跳过左侧元素。
+        路径为 <b>JSON Pointer</b>（<code>~0 / ~1</code> 转义），根路径为空；缺失侧的值省略而非 null。
+        相同记录差异为空；不存在的 ID 会被拒绝并说明原因。</p>
+      <div class="overlay-actions">
+        <button class="btn tiny primary" id="rawdiff-run">▶ 开始比对</button>
+        <button class="btn tiny" id="rawdiff-export" disabled title="有比对结果后可下载完整 JSON">⬇ 下载比对 JSON</button>
+        <button class="btn tiny ghost" id="rawdiff-close">✕ 关闭</button>
+      </div>
+    </div>
+
+    <div class="cmp-toolbar">
+      <div class="cmp-side-sel">
+        <span class="cmp-side-tag a">左侧事件 ID</span>
+        <input type="search" id="rawdiff-left" list="rawdiff-events" placeholder="左侧事件 ID" autocomplete="off">
+      </div>
+      <button class="btn tiny ghost" id="rawdiff-swap" title="交换左 / 右">⇄</button>
+      <div class="cmp-side-sel">
+        <span class="cmp-side-tag b">右侧事件 ID</span>
+        <input type="search" id="rawdiff-right" list="rawdiff-events" placeholder="右侧事件 ID" autocomplete="off">
+      </div>
+      <span id="rawdiff-hint" class="cmp-hint"></span>
+      <datalist id="rawdiff-events"></datalist>
+    </div>
+
+    <div id="rawdiff-result" class="cmp-result"></div>
+  </div>
+</div>
+
 <!-- 导入批次查看与撤回抽屉 -->
 <div id="batch-overlay" class="overlay hidden" aria-hidden="true">
   <div class="overlay-card batch-card-layout">
@@ -285,5 +322,6 @@
 <script src="/static/retraction.js"></script>
 <script src="/static/reconciliation.js"></script>
 <script src="/static/elapsed.js"></script>
+<script src="/static/rawdiff.js"></script>
 </body>
 </html>

@@ -95,6 +95,8 @@ python tests/test_retraction.py  # 纯标准库，覆盖约束撤销建议：最
 python tests/test_reconciliation.py # 纯标准库，覆盖双来源对账：整数毫秒四舍五入 / 闭区间间距 / 全局最优反贪心 / 同优稳定输出 / 200 上限与拒绝
 python tests/test_anchor_calibration.py # 纯标准库，覆盖锚点校准：单对范围 / 闭区间边界 / 多锚点交集 / 冲突上下界锚点 / 漂移固定 / 未保存 offset / 0.5ms 中点 / 重复·失效·来源不一致报错 / 1～20 限制
 python tests/test_elapsed_time.py      # 纯标准库，覆盖两事件耗时审计：精确 min/max（约束收窄朴素差）/ 负界与反向约束 / 环同刻 / 必超·必不超·可能超（闭端点）/ 全量见证可行 / 全局无解无结论 / 未知·相同事件·非法阈值 / 未保存假设 / 只读 / 5000 事件
+python tests/test_elapsed_time.py      # 纯标准库，覆盖两事件耗时审计：精确 min/max（约束收窄朴素差）/ 负界与反向约束 / 环同刻 / 必超·必不超·可能超（闭端点）/ 全量见证可行 / 全局无解无结论 / 未知·相同事件·非法阈值 / 未保存假设 / 只读 / 5000 事件
+python tests/test_rawdiff.py           # 纯标准库，覆盖两事件 raw 结构差异：对象新增/删除/递归替换/类型替换不展开 / 布尔≠数值 / null 与缺失区分 / ~0·~1 转义 / 数组 LCS 删除新增 / 相等优先 / 同优跳左 / 下标按存在侧 / 相同记录差异为空 / 不存在·空 ID 拒绝 / 只读 / 计数
 python tests/test_batches.py           # 纯标准库，覆盖导入批次与安全撤回：批次账本 / 重复跳过 / 悬空端点 / 只删本批 / 重复 ID 不误删 / source_order 重建与归属去污 / 来源保留 / 外部约束悬空 / 不存在·已撤回·未确认·归属冲突拒绝 / 撤回后再导入 / 旧库迁移
 ```
 
@@ -288,6 +290,50 @@ python tests/test_batches.py           # 纯标准库，覆盖导入批次与安
    冲突界限），提示先解决矛盾；**起点或终点事件未知（404）、起终点相同、阈值为负 /
    非数值 / NaN / 无穷**一律以 4xx 明确拒绝。
 
+### 进一步：两事件原始载荷结构比对（🔬）
+
+"两条疑似同一动作的事件，库内存的原始 JSON 到底差在哪几个字段？"点右上
+**🔬 原始载荷比对**（API 为 `POST /api/raw-diff`，下载为
+`GET /api/raw-diff/export?left_id=...&right_id=...`），输入左、右两条事件 ID 即可，
+**只读**比较库内 `events.raw`、不修改任何记录：
+
+1. **对象按键递归**：键只在一侧出现 → 整棵子树记一项 **删除 / 新增**（不再向下展开）；
+   两侧都有则继续递归。键顺序无关，输出按键名稳定排序。
+2. **标量值或 JSON 类型不同 → 替换**：**布尔不与数值相等**（`true ≠ 1`、`false ≠ 0`），
+   数字 `1` 与 `1.0` 视为相等；同类型标量仅值不同与跨类型替换分别标记
+   （替换项带 `type_changed`）。显式 `null` 是"存在的值"，与键缺失不同。
+3. **数组按元素深度相等求最长公共子序列（LCS）**：完全深度相等的元素配对，
+   未匹配元素分别记 **删除 / 新增**（整棵子树一项、不重复展开），数组层面不存在
+   "同位置替换"——类型差异体现在删除项与新增项各自携带的值上。多种最优对齐时
+   **相等元素优先配对，否则优先跳过左侧元素**（左删排在右增之前），结果唯一。
+4. 每项带 **操作类型**、**存在侧的值**与 **JSON Pointer 路径**：`~` 转义为 `~0`、
+   `/` 转义为 `~1`，根路径为空串 `""`；数组下标取元素在**存在侧**的原始下标
+   （删除用左侧下标、新增用右侧下标）；**缺失侧直接省略 `left` / `right` 键，
+   不以 `null` 代替缺失**。
+5. 返回各类数量与明细（`counts.added / removed / replaced / total`、`items`）；
+   **两条记录深度相同时差异为空**（`identical: true`、`items: []`）；**任一 ID 不存在
+   或为空均拒绝并说明原因**（未知 ID → 404，空 ID → 400）。
+
+页面可直接填写（带全量事件 ID 自动补全）/交换左右/查看按操作着色的明细表，
+并 **⬇ 下载完整比对 JSON**；点头部事件 ID 可回主时间线定位。
+
+```bash
+curl -X POST http://localhost:8000/api/raw-diff \
+  -H 'Content-Type: application/json' \
+  -d '{"left_id":"evt_a1b2c3d4e5f6","right_id":"evt_0f1e2d3c4b5a"}'
+# → {"diff_type":"event-raw-structural-diff",
+#    "left":{"id":"...","source_id":"app-server","event_type":"login"},
+#    "right":{...}, "identical": false,
+#    "counts":{"added":1,"removed":1,"replaced":2,"total":4},
+#    "items":[{"op":"replaced","path":"/detail/mfa",
+#              "left":true,"right":1,"type_changed":true},
+#             {"op":"removed","path":"/detail/tags/1","left":"b"},
+#             {"op":"added","path":"/detail/tags/1","right":"c"}, ...]}
+
+# 浏览器/curl 直接下载证据文件
+curl -o raw_diff.json "http://localhost:8000/api/raw-diff/export?left_id=evt_a&right_id=evt_b"
+```
+
 ---
 
 ## 导入批次查看与撤回（🗂）
@@ -454,6 +500,13 @@ gap ∈ [ lo_b - hi_a ,  hi_b - lo_a ]
   分别给出达到端点的全量事件时刻见证（分批渲染、可点击定位），附朴素两区间差对照与
   起终点约束路径方向说明；全局无解时展示矛盾见证、不给耗时结论；事件未知 / 相同 /
   阈值非法明确拒绝；只读，不保存假设或改写数据。
+- **原始载荷比对**（右上 🔬）：输入左 / 右事件 ID（全量自动补全，可交换、回车即比对），
+  对库内 raw 做递归结构差异：对象按键递归（仅一侧的键整子树删除/新增）、标量值或
+  JSON 类型不同标为替换（布尔≠数值，跨类型标“类型”角标）、数组按深度相等 LCS
+  （相等优先配对，同优跳过左侧；未匹配元素整项删除/新增）；明细表按操作着色，给出
+  JSON Pointer 路径（~0/~1 转义，根为空串，下标取存在侧）、存在侧值预览与“缺失”占位
+  （缺失侧省略而非 null）；顶部给出各类数量，相同记录显示差异为空；可下载完整 JSON、
+  点击事件 ID 回主时间线定位；未知 / 空 ID 明确拒绝；只读，不修改任何记录。
 - **导入批次**（右上 🗂）：按每次 JSON 导入形成的批次查看新增来源 / 事件 / 约束与未写入
   （重复 ID / 悬空端点 / 被拒）记录；确认后整批撤回——只删该批实际写入且仍存在、
   归属可安全证明的记录，保留导入前数据与重复未写入的 ID，自动移除批次约束并重建受影响
@@ -493,6 +546,8 @@ gap ∈ [ lo_b - hi_a ,  hi_b - lo_a ]
 | POST | `/api/source-reconciliation` | 双来源事件对账：复用校正区间（含未保存假设），按 actor/类型/闭区间容差做全局最优一一配对，返回配对（中点差/闭区间间距）与两侧未匹配事件（只读，每侧 ≤200，超限 400） |
 | POST | `/api/anchor-calibration` | 锚点校准：1～20 对已配对锚点 + 待校准方（a/b），复用含未保存调整的区间（固定漂移/不确定度），逐对求闭区间相交的待校准方 offset 增量范围并取交集；非空返回绝对 offset 范围与中点，为空返回决定冲突上下界的两对锚点（只读，锚点重复/事件失效/来源不一致 4xx） |
 | POST | `/api/elapsed-time-bounds` | 两事件耗时审计：复用全部事件闭区间 × 全部有效约束（含 source_order，允许同刻），在所有可行分配上求 t_end−t_start 的精确最小/最大值（可为负）及达到端点的全量事件时刻见证；最小>阈值必超、最大≤阈值必不超、否则可能超；全局无解返回矛盾见证不给结论；事件未知 404、起终点相同/阈值非法 400（只读，携带未保存 overrides，不受筛选影响） |
+| POST | `/api/raw-diff` | 两事件库内 raw 原始载荷的递归结构差异：对象按键递归（一侧键→删除/新增，整子树一项不展开）、标量值或 JSON 类型不同→替换（`type_changed`，布尔≠数值）、数组按深度相等 LCS（相等优先配对，同优跳过左侧，未匹配整项删除/新增）；每项带 op/存在侧值/JSON Pointer 路径（~0、~1 转义，根为 `""`，缺失侧省略而非 null）；返回各类计数与明细，相同记录差异为空；ID 未知 404、空 ID 400（只读，不修改记录） |
+| GET | `/api/raw-diff/export?left_id=&right_id=` | 下载两事件 raw 差异 JSON 证据包（便于页面另存；拒绝语义同 POST） |
 | GET | `/api/sample` | 下载内置示例 JSON |
 | POST | `/api/reset` | 清空全部数据 |
 | GET | `/api/health` | 健康检查（Compose healthcheck 使用） |
@@ -909,7 +964,8 @@ curl -X POST http://localhost:8000/api/elapsed-time-bounds \
 ```
 .
 ├── app/
-│   ├── main.py          # FastAPI 路由：导入/假设/重算/筛选/约束/方案 CRUD/对比/敏感性/时序可行性/撤销建议/对账/锚点校准/耗时审计/导出/静态页
+│   ├── main.py          # FastAPI 路由：导入/假设/重算/筛选/约束/方案 CRUD/对比/敏感性/时序可行性/撤销建议/对账/锚点校准/耗时审计/raw 结构差异/导出/静态页
+│   ├── rawdiff.py       # 两事件 raw 递归结构差异：对象按键递归、类型/标量替换（布尔≠数值）、数组深度相等 LCS（相等优先/同优跳左）、JSON Pointer 路径（只读）
 │   ├── engine.py        # 区间模型、边分类、约束传播、Tarjan 环、歧义聚类、稳定签名、导出
 │   ├── feasibility.py   # 全局时序可行性：差分约束联立求解（SCC + Kahn 最长路）、最早可行时刻见证、矛盾路径
 │   ├── retraction.py    # 约束撤销建议：沿矛盾路径的冲突驱动最小撤销搜索，原求解器复核，预算/深度限制
@@ -923,7 +979,7 @@ curl -X POST http://localhost:8000/api/elapsed-time-bounds \
 │   ├── db.py            # SQLite 连接、建表初始化（含 scenarios / import_batches / batch_items 表与旧库加列迁移）
 │   ├── timeutil.py      # 多格式时间戳解析（秒/毫秒/微秒/纳秒、ISO、RFC2822）
 │   ├── sample.py        # 内置示例案件
-│   └── static/          # 原生前端 index.html / style.css / app.js / compare.js / sensitivity.js / feasibility.js / retraction.js / reconciliation.js / elapsed.js / batches.js
+│   └── static/          # 原生前端 index.html / style.css / app.js / compare.js / sensitivity.js / feasibility.js / retraction.js / reconciliation.js / elapsed.js / rawdiff.js / batches.js
 ├── examples/login-anomaly.json
 ├── tests/test_engine.py      # 纯标准库测试（11 项）
 ├── tests/test_scenarios.py   # 方案快照与双方案对比测试（12 项）
@@ -933,6 +989,7 @@ curl -X POST http://localhost:8000/api/elapsed-time-bounds \
 ├── tests/test_reconciliation.py # 双来源事件对账测试（22 项：舍入/闭区间/反贪心/同优稳定/上限拒绝/未保存假设）
 ├── tests/test_anchor_calibration.py # 锚点校准测试（21 项：单对范围/闭区间边界/交集/冲突锚点/漂移固定/未保存 offset/0.5ms 中点/重复·失效·来源不一致/1～20 限制）
 ├── tests/test_elapsed_time.py # 两事件耗时审计测试（20 项：精确 min/max/朴素对照/负界/环同刻/三态闭端点/全量见证/无解无结论/入参拒绝/未保存假设/只读/5000 事件）
+├── tests/test_rawdiff.py      # 两事件 raw 结构差异测试（33 项：对象递归/类型替换不展开/布尔≠数值/null 与缺失/转义/数组 LCS/相等优先/同优跳左/下标按存在侧/空差异/未知·空 ID 拒绝/只读）
 ├── tests/test_batches.py      # 导入批次与安全撤回测试（16 项：账本/重复跳过/只删本批/重复 ID 不误删/source_order 重建/来源保留/外部悬空/不存在·已撤回·未确认·归属冲突拒绝/旧库迁移）
 ├── docker/entrypoint.sh # 启动钩子：初始化数据库后拉起 uvicorn
 ├── Dockerfile
